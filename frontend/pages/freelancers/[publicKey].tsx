@@ -7,7 +7,9 @@ import Link from "next/link";
 import { useRouter } from "next/router";
 import { useEffect, useMemo, useState } from "react";
 import FreelancerTierBadge from "@/components/FreelancerTierBadge";
+import ReputationBadge from "@/components/ReputationBadge";
 import FreelancerProfileSkeleton from "@/components/FreelancerProfileSkeleton";
+import PortfolioVerificationBadge from "@/components/PortfolioVerificationBadge";
 import {
   fetchPublicProfile,
   fetchProfileStats,
@@ -16,12 +18,15 @@ import {
   fetchSkillEndorsements,
   endorseSkill,
   fetchSkillBadges,
- 
   fetchResponseTime,
   fetchUserCertificates,
+  fetchRatings,
+  fetchFreelancerEarnings,
   type CertificateData,
+  type EarningPayment,
 } from "@/lib/api";
 import StateMessage from "@/components/StateMessage";
+import { useToast } from "@/components/Toast";
 import {
   availabilityStatusLabel,
   availabilitySummary,
@@ -34,6 +39,7 @@ import type {
   AvailabilityStatus,
   PortfolioItem,
   ProfileStats,
+  Rating,
   ResponseTime,
   SkillBadge,
   SkillEndorsement,
@@ -67,6 +73,40 @@ function getPortfolioTypeLabel(item: PortfolioItem) {
   }
 }
 
+function getVerificationBadge(item: PortfolioItem): { tone: "verified" | "failed" | "pending"; label: string } | null {
+  // Only verifiable link types surface a badge.
+  if (item.type !== "github" && item.type !== "live") return null;
+
+  if (item.verified === true) {
+    return {
+      tone: "verified",
+      label: item.verifiedAt
+        ? `Verified ${new Date(item.verifiedAt).toLocaleDateString()}`
+        : "Verified",
+    };
+  }
+  if (item.verified === false && item.lastCheckedAt) {
+    return {
+      tone: "failed",
+      label: item.verificationError
+        ? `Could not verify (${truncateError(item.verificationError)})`
+        : "Could not verify",
+    };
+  }
+  if (item.verified === undefined || item.verified === null) {
+    // No check has run yet — surface a subtle "Pending verification" hint
+    // so users know a background check is queued.
+    return { tone: "pending", label: "Pending verification" };
+  }
+  return null;
+}
+
+function truncateError(err: string): string {
+  const trimmed = err.trim();
+  if (trimmed.length <= 24) return trimmed;
+  return `${trimmed.slice(0, 22)}\u2026`;
+}
+
 
 export default function PublicFreelancerProfilePage({
   publicKey,
@@ -74,6 +114,7 @@ export default function PublicFreelancerProfilePage({
   publicKey: string | null;
 }) {
   const router = useRouter();
+  const toast = useToast();
   const rawKey =
     typeof router.query.publicKey === "string" ? router.query.publicKey : "";
 
@@ -85,6 +126,8 @@ export default function PublicFreelancerProfilePage({
   const [certificates, setCertificates] = useState<CertificateData[]>([]);
   const [stats, setStats] = useState<{ totalApplications: number; acceptedApplications: number } | null>(null);
   const [responseTime, setResponseTime] = useState<{ averageDays: number | null } | null>(null);
+  const [ratings, setRatings] = useState<Rating[]>([]);
+  const [completedJobs, setCompletedJobs] = useState<EarningPayment[]>([]);
 
   const isOwner = publicKey && rawKey === publicKey;
 
@@ -115,7 +158,7 @@ export default function PublicFreelancerProfilePage({
       setEndorsements(refreshed);
     } catch (error: unknown) {
       console.error("Endorsement error:", error);
-      alert(error instanceof Error ? error.message : "Failed to endorse skill");
+      toast.error(error instanceof Error ? error.message : "Failed to endorse skill");
     } finally {
       setEndorsingSkill(null);
     }
@@ -200,6 +243,14 @@ export default function PublicFreelancerProfilePage({
       .then((data) => { if (!cancelled) setResponseTime(data); })
       .catch(() => {});
 
+    // Fetch ratings and completed job history (non-blocking)
+    fetchRatings(rawKey)
+      .then((data) => { if (!cancelled) setRatings(data); })
+      .catch(() => {});
+    fetchFreelancerEarnings(rawKey)
+      .then((data) => { if (!cancelled) setCompletedJobs(data.payments.slice(0, 5)); })
+      .catch(() => {});
+
     return () => {
       cancelled = true;
     };
@@ -216,6 +267,7 @@ export default function PublicFreelancerProfilePage({
         <meta property="og:title" content={titleBase} />
         <meta property="og:description" content={metaDescription} />
         <meta property="og:type" content="profile" />
+        <meta property="og:image" content={`https://api.dicebear.com/7.x/identicon/svg?seed=${encodeURIComponent(rawKey)}`} />
         <meta name="twitter:card" content="summary" />
         <meta name="twitter:title" content={titleBase} />
         <meta name="twitter:description" content={metaDescription} />
@@ -278,7 +330,8 @@ export default function PublicFreelancerProfilePage({
                   {state.profile.displayName?.trim() ||
                     shortenAddress(state.profile.publicKey)}
                 </h1>
-                <div className="flex items-center gap-2 mt-3">
+                <div className="flex flex-wrap items-center gap-2 mt-3">
+                  <ReputationBadge userId={state.profile.publicKey} size="md" />
                   <FreelancerTierBadge
                     tier={state.profile.tier}
                     className="text-sm"
@@ -414,6 +467,9 @@ export default function PublicFreelancerProfilePage({
                   <p className="font-display text-2xl sm:text-3xl font-bold text-market-400">
                     {state.profile.rating?.toFixed(2) ?? "New"}
                   </p>
+                  {state.profile.ratingCount != null && state.profile.ratingCount > 0 && (
+                    <p className="text-xs text-amber-800 mt-1">{state.profile.ratingCount} review{state.profile.ratingCount !== 1 ? "s" : ""}</p>
+                  )}
                 </div>
               )}
               <div className="rounded-xl bg-ink-900/50 border border-market-500/10 p-4">
@@ -599,32 +655,109 @@ export default function PublicFreelancerProfilePage({
               {state.profile.portfolioItems &&
               state.profile.portfolioItems.length > 0 ? (
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                  {state.profile.portfolioItems.map((item, index) => (
-                    <a
-                      key={`${item.type}-${item.url}-${index}`}
-                      href={getPortfolioHref(item)}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="rounded-xl border border-market-500/15 bg-ink-900/50 p-4 hover:border-market-400/40 hover:bg-ink-900/70 transition-colors"
-                    >
-                      <p className="text-xs uppercase tracking-[0.18em] text-market-300/80 mb-2">
-                        {getPortfolioTypeLabel(item)}
-                      </p>
-                      <h3 className="text-amber-100 font-medium text-base break-words mb-2">
-                        {item.title}
-                      </h3>
-                      <p className="text-sm text-amber-700/90 break-all">
-                        {item.type === "stellar_tx"
-                          ? item.url
-                          : getPortfolioHref(item)}
-                      </p>
-                    </a>
-                  ))}
+                  {state.profile.portfolioItems.map((item, index) => {
+                    const badge = getVerificationBadge(item);
+                    return (
+                      <a
+                        key={`${item.type}-${item.url}-${index}`}
+                        href={getPortfolioHref(item)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="group relative rounded-xl border border-market-500/15 bg-ink-900/50 p-4 hover:border-market-400/40 hover:bg-ink-900/70 transition-colors"
+                      >
+                        <div className="flex items-start justify-between gap-2 mb-2">
+                          <p className="text-xs uppercase tracking-[0.18em] text-market-300/80">
+                            {getPortfolioTypeLabel(item)}
+                          </p>
+                          {badge && <PortfolioVerificationBadge badge={badge} />}
+                        </div>
+                        <h3 className="text-amber-100 font-medium text-base break-words mb-2">
+                          {item.title}
+                        </h3>
+                        <p className="text-sm text-amber-700/90 break-all">
+                          {item.type === "stellar_tx"
+                            ? item.url
+                            : getPortfolioHref(item)}
+                        </p>
+                      </a>
+                    );
+                  })}
                 </div>
               ) : (
                 <p className="text-amber-900/80 text-sm italic">
                   No portfolio items yet.
                 </p>
+              )}
+            </div>
+
+            {/* Completed job history */}
+            {completedJobs.length > 0 && (
+              <div className="mt-6 sm:mt-8">
+                <h2 className="label mb-3">Recent completed jobs</h2>
+                <ul className="space-y-3">
+                  {completedJobs.map((payment) => (
+                    <li
+                      key={payment.id}
+                      className="flex items-center justify-between gap-3 rounded-xl border border-market-500/10 bg-ink-900/50 px-4 py-3"
+                    >
+                      <div className="min-w-0">
+                        <Link
+                          href={`/jobs/${payment.jobId}`}
+                          className="text-sm font-medium text-amber-100 hover:text-market-400 transition-colors truncate block"
+                        >
+                          {payment.jobTitle || shortenAddress(payment.jobId)}
+                        </Link>
+                        <p className="text-xs text-amber-800 mt-0.5">
+                          {payment.releasedAt
+                            ? new Date(payment.releasedAt).toLocaleDateString()
+                            : "—"}
+                        </p>
+                      </div>
+                      <span className="shrink-0 text-sm font-semibold text-market-400">
+                        {formatXLM(payment.amountXlm)}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* Ratings & reviews */}
+            <div className="mt-6 sm:mt-8">
+              <h2 className="label mb-3">
+                Reviews
+                {ratings.length > 0 && (
+                  <span className="ml-2 text-xs font-normal text-amber-800 normal-case tracking-normal">
+                    {ratings.length} total
+                  </span>
+                )}
+              </h2>
+              {ratings.length > 0 ? (
+                <ul className="space-y-4">
+                  {ratings.map((r) => (
+                    <li
+                      key={r.id}
+                      className="rounded-xl border border-market-500/10 bg-ink-900/50 p-4"
+                    >
+                      <div className="flex items-center justify-between gap-2 mb-2">
+                        <span className="text-market-400 font-semibold text-sm" aria-label={`${r.stars} stars`}>
+                          {"★".repeat(r.stars)}{"☆".repeat(5 - r.stars)}
+                        </span>
+                        <span className="text-xs text-amber-800">
+                          {new Date(r.createdAt).toLocaleDateString()}
+                        </span>
+                      </div>
+                      {r.review ? (
+                        <p className="text-sm text-amber-700/90 leading-relaxed">{r.review}</p>
+                      ) : null}
+                      <p className="text-xs text-amber-900/70 font-mono mt-2">
+                        {shortenAddress(r.raterAddress)}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-amber-900/80 text-sm italic">No reviews yet.</p>
               )}
             </div>
           </article>
