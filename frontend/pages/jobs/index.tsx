@@ -1,4 +1,4 @@
-﻿/**
+/**
  * pages/jobs/index.tsx
  * Browse all open jobs with category filtering and search autocomplete.
  */

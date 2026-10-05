@@ -17,15 +17,17 @@ const morgan = require("morgan");
 const promClient = require("prom-client");
 const compressionMiddleware = require("./middleware/compression");
 const rateLimit = require("express-rate-limit");
+const cookieParser = require("cookie-parser");
+const { doubleCsrfProtection } = require("./middleware/csrf");
 const { getClientIp } = require("./utils/clientIp");
 const { WebSocketServer } = require("ws");
 const nodemailer = require("nodemailer");
  
 // TODO(verify paths): these were used in the original but never imported.
 const { createServiceLogger, logError } = require("./utils/logger");
-const { sendEmail } = require("./services/emailService");
-const { requireChoice } = require("./utils/env");
-const structuredErrorHandler = require("./middleware/errorHandler");
+const { sendEmail } = require("./utils/email");
+const { requireChoice } = require("./config/env");
+const { structuredErrorHandler } = require("./utils/errors");
  
 const jobRoutes = require("./routes/jobs");
 const applicationRoutes = require("./routes/applications");
@@ -348,11 +350,16 @@ const allowedOrigins = (process.env.ALLOWED_ORIGINS || "http://localhost:3000").
 app.use(cors({
   origin: (origin, cb) => (!origin || allowedOrigins.includes(origin)) ? cb(null, true) : cb(new Error("CORS blocked")),
   methods: ["GET", "POST", "PATCH", "DELETE"],
-  allowedHeaders: ["Content-Type", "Authorization"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-CSRF-Token"],
   credentials: true,
 }));
  
 app.use(rateLimit({ windowMs: 15 * 60 * 1000, max: 150, standardHeaders: true, legacyHeaders: true }));
+
+// cookie-parser must run before the CSRF guard: csrf-csrf reads `req.cookies`
+// to validate the double-submit token and throws if it is undefined.
+app.use(cookieParser());
+app.use(doubleCsrfProtection);
  
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use("/health",            healthRoutes);
@@ -413,12 +420,7 @@ app.use((req, res) => {
  
 app.use((err, req, res, next) => {
   console.error("[Error]", err.message);
-  if (typeof structuredErrorHandler === "function") {
-    return structuredErrorHandler(err, req, res, next);
-  }
-  res.status(err.status || 500).json({
-    error: err.message || "Internal server error",
-  });
+  return structuredErrorHandler(err, req, res, next);
 });
  
 // ─── WebSockets ───────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-﻿/**
+/**
  * src/routes/admin.js
  * Admin-only moderation routes â€” protected by JWT role=admin check.
  *
