@@ -70,7 +70,7 @@ fn setup_escrow(
     }
 }
 
-
+fn setup_contract(
     env: &Env,
 ) -> (
     MarketPayContractClient,
