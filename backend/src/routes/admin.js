@@ -836,7 +836,7 @@ router.post("/cost-report/generate", verifyJWT, requireAdminRole, requireAdmin2F
       },
     })
     .catch(() => {});
-  res.json({ success: true, message: "Cost report generation triggered. Report will be emailed to admin." });
+  res.json({ success: true, message: "Cost report generation triggered." });
 });
 
 // â”€â”€ GET /api/admin/metrics/time-series â€” platform_metrics for charting â”€â”€â”€â”€
